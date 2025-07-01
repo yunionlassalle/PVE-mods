@@ -160,22 +160,39 @@ function configure {
 		ENABLE_RAM_TEMP=false
 	fi
 
-	# Check if HDD/SSD data is installed
-	msg "\nDetecting support for HDD/SDD temperature sensors..."
-	if (lsmod | grep -wq "drivetemp"); then
-		# Check if SDD/HDD data is available
-		if (echo "$sensorsOutput" | grep -q "drivetemp-scsi-"); then
-			msg "Detected sensors:\n$(echo "$sensorsOutput" | grep -o '"drivetemp-scsi[^"]*"' | sed 's/"//g')"
+# Check if HDD/SSD data is installed
+msg "\nDetecting support for HDD/SDD temperature sensors..."
+HDD_TEMP_SMART_OUTPUT=""
+HDD_TEMP_FOUND=false
+
+if (lsmod | grep -wq "drivetemp") && (echo "$sensorsOutput" | grep -q "drivetemp-scsi-"); then
+	msg "Detected sensors:\n$(echo "$sensorsOutput" | grep -o '"drivetemp-scsi[^"]*"' | sed 's/"//g')"
+	ENABLE_HDD_TEMP=true
+	SENSORS_DETECTED=true
+else
+	# Fallback: get temps with smartctl if drivetemp/lm-sensors failed
+	SMARTCTLS_FOUND=false
+	if command -v smartctl &>/dev/null; then
+		for disk in /dev/sd?; do
+			if smartctl -A "$disk" | grep -q "Temperature_Celsius"; then
+				temp=$(smartctl -A "$disk" | awk '/Temperature_Celsius/ {print $10}')
+				HDD_TEMP_SMART_OUTPUT+="$(basename $disk): ${temp}°C  "
+				HDD_TEMP_FOUND=true
+			fi
+		done
+		if [ "$HDD_TEMP_FOUND" = true ]; then
 			ENABLE_HDD_TEMP=true
 			SENSORS_DETECTED=true
+			msg "Detected HDD/SSD temps via smartctl: $HDD_TEMP_SMART_OUTPUT"
 		else
-			warn "Kernel module \"drivetemp\" is not installed. HDD/SDD temperatures will not be available."
+			warn "No HDD/SSD temperature sensors found via smartctl."
 			ENABLE_HDD_TEMP=false
 		fi
 	else
-		warn "No HDD/SSD temperature sensors found."
+		warn "smartctl not installed, cannot detect HDD/SSD temperature."
 		ENABLE_HDD_TEMP=false
 	fi
+fi
 
 	# Check if NVMe data is available
 	msg "\nDetecting support for NVMe temperature sensors..."
@@ -323,7 +340,10 @@ function install_mod {
 			sensorsCmd="sensors -j"
 		fi
 		sed -i '/my \$dinfo = df('\''\/'\'', 1);/i\'$'\t''$res->{sensorsOutput} = `'"$sensorsCmd"'`;\n\t# sanitize JSON output\n\t$res->{sensorsOutput} =~ s/ERROR:.+\\s(\\w+):\\s(.+)/\\"$1\\": 0.000,/g;\n\t$res->{sensorsOutput} =~ s/ERROR:.+\\s(\\w+)!/\\"$1\\": 0.000,/g;\n\t$res->{sensorsOutput} =~ s/,(.*[.\\n]*.+})/$1/g;\n' "$NODES_PM_FILE"
-		msg "Sensors' output added to \"$NODES_PM_FILE\"."
+		if [ -n "$HDD_TEMP_SMART_OUTPUT" ]; then
+			echo "$HDD_TEMP_SMART_OUTPUT" > "$SCRIPT_CWD/hddtemps.txt"
+        	fi
+                msg "Sensors' output added to \"$NODES_PM_FILE\"."
 	fi
 
 	if [ $ENABLE_SYSTEM_INFO = true ]; then
